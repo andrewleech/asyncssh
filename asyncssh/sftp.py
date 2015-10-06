@@ -383,6 +383,21 @@ class _LocalFile:
         self._file.close()
 
 
+class SFTPProgress:
+    """SFTP Progress
+
+       This is a base class for reporting progress during
+       a _copy function. Override the callback function in
+       user code and pass in instantiation of class as progress
+       argument to file operations.
+    """
+
+    STATUS_COPY = "Copy"
+    STATUS_DONE = "Done"
+
+    def callback(self, filename, status, filesize=None, copied=None):
+        pass
+
 class SFTPError(Error):
     """SFTP error
 
@@ -1672,7 +1687,7 @@ class SFTPClient:
 
     @asyncio.coroutine
     def _copy(self, srcfs, dstfs, srcpath, dstpath, preserve,
-              recurse, follow_symlinks, error_handler):
+              recurse, follow_symlinks, error_handler, progress):
         """Copy a file, directory, or symbolic link"""
 
         if follow_symlinks:
@@ -1700,18 +1715,24 @@ class SFTPClient:
 
                     yield from self._copy(srcfs, dstfs, srcfile,
                                           dstfile, preserve, recurse,
-                                          follow_symlinks, error_handler)
+                                          follow_symlinks, error_handler, progress)
             elif stat.S_ISLNK(srcattrs.permissions):
                 targetpath = yield from srcfs.readlink(srcpath)
                 yield from dstfs.symlink(targetpath, dstpath)
             else:
                 with (yield from srcfs.open(srcpath, 'rb')) as src:
                     with (yield from dstfs.open(dstpath, 'wb')) as dst:
+                        copied = 0
+                        filesize = srcattrs.size
                         while True:
                             data = yield from src.read(_SFTP_BLOCK_SIZE)
+                            copied += len(data) if data else 0
+                            if isinstance(progress, SFTPProgress):
+                                progress.callback(dstpath, progress.STATUS_COPY, filesize, copied)
                             if not data:
+                                if filesize == copied:
+                                    progress.callback(dstpath, progress.STATUS_DONE, filesize, copied)
                                 break
-
                             yield from dst.write(data)
 
             if preserve:
@@ -1731,7 +1752,7 @@ class SFTPClient:
 
     @asyncio.coroutine
     def _begin_copy(self, srcfs, dstfs, srcpaths, dstpath, preserve,
-                    recurse, follow_symlinks, error_handler):
+                    recurse, follow_symlinks, error_handler, progress):
         """Begin a new file upload, download, or copy"""
 
         dst_isdir = dstpath is None or (yield from dstfs.isdir(dstpath))
@@ -1755,11 +1776,12 @@ class SFTPClient:
                 dstfile = dstpath
 
             yield from self._copy(srcfs, dstfs, srcfile, dstfile, preserve,
-                                  recurse, follow_symlinks, error_handler)
+                                  recurse, follow_symlinks, error_handler,
+                                  progress)
 
     @asyncio.coroutine
-    def get(self, remotepaths, localpath=None, *, preserve=False,
-            recurse=False, follow_symlinks=False, error_handler=None):
+    def get(self, remotepaths, localpath=None, *, preserve=False, recurse=False,
+            follow_symlinks=False, error_handler=None, progress=None):
         """Download remote files
 
            This method downloads one or more files or directories from
@@ -1823,11 +1845,11 @@ class SFTPClient:
 
         yield from self._begin_copy(self, _LocalFile, remotepaths, localpath,
                                     preserve, recurse, follow_symlinks,
-                                    error_handler)
+                                    error_handler, progress)
 
     @asyncio.coroutine
-    def put(self, localpaths, remotepath=None, *, preserve=False,
-            recurse=False, follow_symlinks=False, error_handler=None):
+    def put(self, localpaths, remotepath=None, *, preserve=False, recurse=False,
+            follow_symlinks=False, error_handler=None, progress=None):
         """Upload local files
 
            This method uploads one or more files or directories to the
@@ -1892,11 +1914,11 @@ class SFTPClient:
 
         yield from self._begin_copy(_LocalFile, self, localpaths, remotepath,
                                     preserve, recurse, follow_symlinks,
-                                    error_handler)
+                                    error_handler, progress)
 
     @asyncio.coroutine
-    def copy(self, srcpaths, dstpath=None, *, preserve=False,
-             recurse=False, follow_symlinks=False, error_handler=None):
+    def copy(self, srcpaths, dstpath=None, *, preserve=False, recurse=False,
+             follow_symlinks=False, error_handler=None, progress=None):
         """Copy remote files to a new location
 
            This method copies one or more files or directories on the
@@ -1960,11 +1982,12 @@ class SFTPClient:
         """
 
         yield from self._begin_copy(self, self, srcpaths, dstpath, preserve,
-                                    recurse, follow_symlinks, error_handler)
+                                    recurse, follow_symlinks, error_handler,
+                                    progress)
 
     @asyncio.coroutine
-    def mget(self, remotepaths, localpath=None, *, preserve=False,
-             recurse=False, follow_symlinks=False, error_handler=None):
+    def mget(self, remotepaths, localpath=None, *, preserve=False, recurse=False,
+             follow_symlinks=False, error_handler=None, progress=None):
         """Download remote files with glob pattern match
 
            This method downloads files and directories from the remote
@@ -1980,11 +2003,11 @@ class SFTPClient:
 
         yield from self._begin_copy(self, _LocalFile, matches, localpath,
                                     preserve, recurse, follow_symlinks,
-                                    error_handler)
+                                    error_handler, progress)
 
     @asyncio.coroutine
-    def mput(self, localpaths, remotepath=None, *, preserve=False,
-             recurse=False, follow_symlinks=False, error_handler=None):
+    def mput(self, localpaths, remotepath=None, *, preserve=False, recurse=False,
+             follow_symlinks=False, error_handler=None, progress=None):
         """Upload local files with glob pattern match
 
            This method uploads files and directories to the remote
@@ -2001,11 +2024,11 @@ class SFTPClient:
 
         yield from self._begin_copy(_LocalFile, self, matches, remotepath,
                                     preserve, recurse, follow_symlinks,
-                                    error_handler)
+                                    error_handler, progress)
 
     @asyncio.coroutine
-    def mcopy(self, srcpaths, dstpath=None, *, preserve=False,
-              recurse=False, follow_symlinks=False, error_handler=None):
+    def mcopy(self, srcpaths, dstpath=None, *, preserve=False, recurse=False,
+              follow_symlinks=False, error_handler=None, progress=None):
         """Download remote files with glob pattern match
 
            This method copies files and directories on the remote
@@ -2020,7 +2043,8 @@ class SFTPClient:
         matches = yield from self._begin_glob(self, srcpaths, error_handler)
 
         yield from self._begin_copy(self, self, matches, dstpath, preserve,
-                                    recurse, follow_symlinks, error_handler)
+                                    recurse, follow_symlinks, error_handler,
+                                    progress)
 
     @asyncio.coroutine
     def glob(self, patterns, error_handler=None):
