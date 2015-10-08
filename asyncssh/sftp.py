@@ -392,8 +392,10 @@ class SFTPProgress:
        argument to file operations.
     """
 
-    STATUS_COPY = "Copy"
-    STATUS_DONE = "Done"
+    STATUS_WAIT = "Pending"
+    STATUS_COPY = "Copying"
+    STATUS_DONE = "Finished"
+    STATUS_FAIL = "Failed"
 
     def callback(self, filename, status, filesize=None, copied=None):
         pass
