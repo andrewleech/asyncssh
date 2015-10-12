@@ -1248,32 +1248,40 @@ class SFTPFile:
             # We're appending and haven't seeked backward in the file
             # since the last write, so there's no data to return
             data = b''
-        elif size is None or size < 0:
-            data = []
 
-            try:
-                while True:
-                    result = yield from self._session.read(self._handle,
-                                                           offset,
-                                                           _SFTP_BLOCK_SIZE)
+        else:
+            data = []
+            blocksize = 64*1024
+            numblocks = size or _SFTP_BLOCK_SIZE
+
+            def try_read(handle,offset):
+                try:
+                    ret = yield from self._session.read(handle, offset,blocksize)
+                except SFTPError as exc:
+                    if exc.code != FX_EOF:
+                        raise
+                    else:
+                        ret = b''
+                return ret
+
+            while True:
+                futures = []
+
+                for offset in range(self._offset, self._offset+numblocks, blocksize):
+                    futures.append(asyncio.Task(try_read(self._handle, offset)))
+
+                results = yield from asyncio.gather(*futures)
+
+                for result in results:
                     data.append(result)
                     offset += len(result)
-                    self._offset = offset
-            except SFTPError as exc:
-                if exc.code != FX_EOF:
-                    raise
 
-            data = b''.join(data)
-        else:
-            data = b''
+                self._offset = offset
 
-            try:
-                data = yield from self._session.read(self._handle,
-                                                     offset, size)
-                self._offset = offset + len(data)
-            except SFTPError as exc:
-                if exc.code != FX_EOF:
-                    raise
+                if size is not None and size > 0:
+                    break
+
+        data = b''.join(data)
 
         if self._encoding:
             data = data.decode(self._encoding, self._errors)
@@ -1731,11 +1739,14 @@ class SFTPClient:
                             copied += len(data) if data else 0
                             if isinstance(progress, SFTPProgress):
                                 progress.callback(dstpath, progress.STATUS_COPY, filesize, copied)
-                            if not data:
+
                                 if filesize == copied:
                                     progress.callback(dstpath, progress.STATUS_DONE, filesize, copied)
+
+                            if data:
+                                yield from dst.write(data)
+                            elif filesize == copied or not data:
                                 break
-                            yield from dst.write(data)
 
             if preserve:
                 yield from dstfs.setstat(
