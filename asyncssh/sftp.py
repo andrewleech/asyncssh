@@ -50,7 +50,7 @@ from .packet import Byte, String, UInt32, UInt64, SSHPacket
 from .session import SSHClientSession, SSHServerSession
 
 _SFTP_VERSION = 3
-_SFTP_BLOCK_SIZE = 8192
+_SFTP_BLOCK_SIZE = 64*1024
 
 
 def _setstat(path, attrs):
@@ -397,8 +397,16 @@ class SFTPProgress:
     STATUS_DONE = "Finished"
     STATUS_FAIL = "Failed"
 
-    def callback(self, filename, status, filesize=None, copied=None):
-        pass
+    def __init__(self):
+        self._progress = {}
+
+    def callback(self, filename, status, filesize=None, chunk=0):
+        size, current = self._progress.get(filename, (None,0))
+        size = filesize if not size else size
+        current += chunk
+        self._progress[filename] = (size, current)
+        percent = 100.0 * size / filesize
+        print ("\r%s: %0.2f (%s)" % (self._progress[filename], percent, status), end="")
 
 class SFTPError(Error):
     """SFTP error
@@ -1206,7 +1214,17 @@ class SFTPFile:
         return attrs.size
 
     @asyncio.coroutine
-    def read(self, size=-1, offset=None):
+    def _chunk(self, offset, size, callback=None):
+        try:
+            dat = yield from self._session.read(self._handle, offset, size)
+        except SFTPError:
+            dat = b''
+        if callback:
+            callback(len(dat))
+        return offset, dat
+
+    @asyncio.coroutine
+    def read(self, size=-1, offset=None, callback=None):
         """Read data from the remote file
 
            This method reads and returns up to ``size`` bytes of data
@@ -1254,27 +1272,19 @@ class SFTPFile:
             blocksize = 64*1024
             numblocks = size or _SFTP_BLOCK_SIZE
 
-            def try_read(handle,offset):
-                try:
-                    ret = yield from self._session.read(handle, offset,blocksize)
-                except SFTPError as exc:
-                    if exc.code != FX_EOF:
-                        raise
-                    else:
-                        ret = b''
-                return ret
-
             while True:
                 futures = []
 
                 for offset in range(self._offset, self._offset+numblocks, blocksize):
-                    futures.append(asyncio.Task(try_read(self._handle, offset)))
+                    futures.append(self._chunk(offset, blocksize, callback))
 
-                results = yield from asyncio.gather(*futures)
+                done, pending = yield from asyncio.wait(futures)
 
-                for result in results:
-                    data.append(result)
-                    offset += len(result)
+                datas = [task.result() for task in done]
+                datas.sort(key=lambda t:t[0])
+                for offset, chunk in datas:
+                    data.append(chunk)
+                offset += len(chunk)
 
                 self._offset = offset
 
@@ -1734,14 +1744,15 @@ class SFTPClient:
                     with (yield from dstfs.open(dstpath, 'wb')) as dst:
                         copied = 0
                         filesize = srcattrs.size
-                        while True:
-                            data = yield from src.read(_SFTP_BLOCK_SIZE)
-                            copied += len(data) if data else 0
-                            if isinstance(progress, SFTPProgress):
-                                progress.callback(dstpath, progress.STATUS_COPY, filesize, copied)
+                        callback = None
+                        if isinstance(progress, SFTPProgress):
+                            callback = lambda chunk: progress.callback(dstpath, progress.STATUS_COPY, filesize, chunk)
 
-                                if filesize == copied:
-                                    progress.callback(dstpath, progress.STATUS_DONE, filesize, copied)
+                        while True:
+                            data = yield from src.read(min(_SFTP_BLOCK_SIZE,filesize), callback=callback)
+                            copied += len(data) if data else 0
+                            if isinstance(progress, SFTPProgress) and  filesize == copied:
+                                progress.callback(dstpath, progress.STATUS_DONE)
 
                             if data:
                                 yield from dst.write(data)
